@@ -78,7 +78,7 @@ AWS_SECRET_ACCESS_KEY
   <img src="https://user-images.githubusercontent.com/65826354/184551000-29f59b56-cbcc-4daf-9dad-a40e35bd6e02.png">
 </p>
 
-**Step 3.** From the repository actions tab, select the module to deploy and run the ``Terraform Apply`` Workflow.
+**Step 3.** From the repository actions tab, select the module to deploy and run the ``Terraform Apply`` Workflow. You can optionally set **Region** (e.g. `eu-west-1`) or rely on the `AWS_REGION` environment variable (default `eu-west-3`, Paris).
 
 <p align="center">
   <img src="https://user-images.githubusercontent.com/65826354/194799524-a814fba3-2936-47a3-bb11-9d65f65bbf60.png">
@@ -90,6 +90,14 @@ AWS_SECRET_ACCESS_KEY
   <img src="https://user-images.githubusercontent.com/65826354/184553744-c1ba94a1-0d67-4a86-b97d-ee7afe6c65fe.png">
 </p>
 
+### GitHub Actions workflows
+
+| Workflow | Use |
+|----------|-----|
+| **Terraform Apply** (`tf-apply-main.yml`) | Deploy a single lab instance: choose **module** (module-1 or module-2), optional **Student ID** (e.g. `student-01`) for multi-student, and optional **region**. Runs bootstrap if needed, imports existing resources when re-running, then applies Terraform. |
+| **Terraform Apply (Bulk)** (`tf-apply-bulk.yml`) | Deploy many lab instances in one run: set **Number of instances** (e.g. 5) and **Module**; student IDs `01`, `02`, … are used automatically. Runs up to 5 applies in parallel. Use for classrooms or multiple isolated labs in the same account. |
+| **Terraform Destroy** (`tf-destroy-main.yml`) | Remove one deployment: choose **module** and **Student ID** (must match the deploy). Destroys that workspace’s resources and state only. |
+| **Terraform Clean Up** (`tf-clean-up.yml`) | Remove all AWSGoat resources in the account: discovers all workspaces from the state bucket, runs `terraform destroy` for each (module-1 and module-2), empties and deletes the state bucket, then runs the tag-based cleanup script to delete any remaining resources tagged `Project=AWSGoat` (ALBs, target groups, RDS, SGs, IAM, etc.). Use when tearing down the entire lab environment. |
 
 ### Manual Installation
 
@@ -113,6 +121,42 @@ cd modules/module-<Number>
 terraform init
 terraform apply --auto-approve
 ```
+Optional: set the AWS region via environment variable (default is `eu-west-3`, Paris):
+```sh
+export TF_VAR_region=eu-west-1
+terraform apply --auto-approve
+```
+
+### Multi-Student Deployment
+
+You can deploy **multiple isolated lab instances** in the same AWS account (e.g. one per student). This is especially important for **privilege escalation scenarios**: each student gets their own IAM roles, S3 buckets, EC2/ECS resources, and escalation path so they do not interfere with each other.
+
+**GitHub Actions** (see the [GitHub Actions workflows](#github-actions-workflows) table above for a description of each workflow)
+
+- When running **Terraform Apply**, optionally set **Student ID** (e.g. `student-01`, `student-02`). Leave empty for a single default deployment.
+- **Terraform Apply (Bulk)** launches multiple lab instances in one run: set **Number of instances** (e.g. 5) and **Module**; student IDs 01, 02, … are used automatically. Runs up to 5 applies in parallel.
+- When running **Terraform Destroy**, use the same **Student ID** you used for that deployment.
+- **Terraform Clean Up** removes all deployments and the state bucket, then deletes any remaining resources tagged `Project=AWSGoat`.
+- State is stored per student: `terraform.tfstate` (default) or `terraform.tfstate.<student_id>`.
+
+**Manual (CLI)**
+
+- Single deployment (unchanged):
+  ```sh
+  cd modules/module-<Number>
+  terraform init
+  terraform apply -auto-approve
+  ```
+- Per-student deployment using [Terraform workspaces](https://developer.hashicorp.com/terraform/language/state/workspaces):
+  ```sh
+  cd modules/module-<Number>
+  terraform init
+  terraform workspace new student-01   # or: terraform workspace select student-01
+  terraform apply -auto-approve -var="student_id=student-01"
+  ```
+- Resource names are suffixed with the student ID (e.g. `AWS_GOAT_ROLE-student-01`, `blog_app_lambda_data-student-01`, `ecs-instance-role-student-01`, `ec2Deployer-role-student-01`). Attack manuals use the same steps; use the role/bucket names from your deployment (or the suffix shown in Terraform output).
+
+**Tag for cleanup:** All resources are tagged `Project = AWSGoat`. In the AWS console, filter by this tag to find or bulk-delete lab resources.
 
 # Modules
 

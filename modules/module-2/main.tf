@@ -1,4 +1,8 @@
 terraform {
+  backend "s3" {
+    # Partial config: pass bucket, key, region, workspace_key_prefix via -backend-config in CI (e.g. tf-apply-bulk.yml).
+    # See: https://developer.hashicorp.com/terraform/language/settings/backends/s3
+  }
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -8,10 +12,21 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-1"
+  region = var.region
+
+  default_tags {
+    tags = {
+      Project = "AWSGoat"
+    }
+  }
 }
 
 data "aws_caller_identity" "current" {}
+
+locals {
+  name_suffix  = var.student_id == "default" ? "" : "-${lower(replace(var.student_id, "_", "-"))}"
+  common_tags  = { Project = "AWSGoat" }
+}
 
 data "aws_availability_zones" "available" {
   state = "available"
@@ -22,21 +37,27 @@ resource "aws_vpc" "lab-vpc" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = {
-    Name = "AWS_GOAT_VPC"
-  }
+
+  tags = merge(local.common_tags, {
+    Name    = "AWS_GOAT_VPC${local.name_suffix}"
+    Project = "AWSGoat"
+  })
 }
 resource "aws_subnet" "lab-subnet-public-1" {
   vpc_id                  = aws_vpc.lab-vpc.id
   cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
   availability_zone       = data.aws_availability_zones.available.names[0]
+
+  tags = merge(local.common_tags, {
+    Name = "lab-subnet-public-1${local.name_suffix}"
+  })
 }
 resource "aws_internet_gateway" "my_vpc_igw" {
   vpc_id = aws_vpc.lab-vpc.id
-  tags = {
-    Name = "My VPC - Internet Gateway"
-  }
+  tags = merge(local.common_tags, {
+    Name = "My-VPC-IGW${local.name_suffix}"
+  })
 }
 resource "aws_route_table" "my_vpc_us_east_1_public_rt" {
   vpc_id = aws_vpc.lab-vpc.id
@@ -45,9 +66,9 @@ resource "aws_route_table" "my_vpc_us_east_1_public_rt" {
     gateway_id = aws_internet_gateway.my_vpc_igw.id
   }
 
-  tags = {
-    Name = "Public Subnet Route Table."
-  }
+  tags = merge(local.common_tags, {
+    Name = "Public-Subnet-RT${local.name_suffix}"
+  })
 }
 
 resource "aws_route_table_association" "my_vpc_us_east_1a_public" {
@@ -59,6 +80,10 @@ resource "aws_subnet" "lab-subnet-public-1b" {
   cidr_block              = "10.0.128.0/24"
   availability_zone       = data.aws_availability_zones.available.names[1]
   map_public_ip_on_launch = true
+
+  tags = merge(local.common_tags, {
+    Name = "lab-subnet-public-1b${local.name_suffix}"
+  })
 }
 resource "aws_route_table_association" "my_vpc_us_east_1b_public" {
   subnet_id      = aws_subnet.lab-subnet-public-1b.id
@@ -66,9 +91,10 @@ resource "aws_route_table_association" "my_vpc_us_east_1b_public" {
 }
 
 resource "aws_security_group" "ecs_sg" {
-  name        = "ECS-SG"
+  name        = "ECS-SG${local.name_suffix}"
   description = "SG for cluster created from terraform"
   vpc_id      = aws_vpc.lab-vpc.id
+  tags        = merge(local.common_tags, { Name = "ECS-SG${local.name_suffix}" })
 
   ingress {
     from_port       = 0
@@ -88,20 +114,20 @@ resource "aws_security_group" "ecs_sg" {
 # Create Database Subnet Group
 # terraform aws db subnet group
 resource "aws_db_subnet_group" "database-subnet-group" {
-  name        = "database subnets"
+  name        = "database-subnets${local.name_suffix}"
   subnet_ids  = [aws_subnet.lab-subnet-public-1.id, aws_subnet.lab-subnet-public-1b.id]
   description = "Subnets for Database Instance"
 
-  tags = {
-    Name = "Database Subnets"
-  }
+  tags = merge(local.common_tags, {
+    Name = "Database Subnets${local.name_suffix}"
+  })
 }
 
 # Create Security Group for the Database
 # terraform aws create security group
 
 resource "aws_security_group" "database-security-group" {
-  name        = "Database Security Group"
+  name        = "Database-Security-Group${local.name_suffix}"
   description = "Enable MYSQL Aurora access on Port 3306"
   vpc_id      = aws_vpc.lab-vpc.id
 
@@ -120,16 +146,16 @@ resource "aws_security_group" "database-security-group" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "rds-db-sg"
-  }
+  tags = merge(local.common_tags, {
+    Name = "rds-db-sg${local.name_suffix}"
+  })
 
 }
 
 # Create Database Instance Restored from DB Snapshots
 # terraform aws db instance
 resource "aws_db_instance" "database-instance" {
-  identifier             = "aws-goat-db"
+  identifier             = "aws-goat-db${local.name_suffix}"
   allocated_storage      = 10
   instance_class         = "db.t3.micro"
   engine                 = "mysql"
@@ -138,15 +164,16 @@ resource "aws_db_instance" "database-instance" {
   password               = "T2kVB3zgeN3YbrKS"
   parameter_group_name   = "default.mysql8.0"
   skip_final_snapshot    = true
-  availability_zone      = "us-east-1a"
+  availability_zone      = data.aws_availability_zones.available.names[0]
   db_subnet_group_name   = aws_db_subnet_group.database-subnet-group.name
   vpc_security_group_ids = [aws_security_group.database-security-group.id]
+  tags                   = merge(local.common_tags, { Name = "aws-goat-db${local.name_suffix}" })
 }
 
 
 
 resource "aws_security_group" "load_balancer_security_group" {
-  name        = "Load-Balancer-SG"
+  name        = "Load-Balancer-SG${local.name_suffix}"
   description = "SG for load balancer created from terraform"
   vpc_id      = aws_vpc.lab-vpc.id
 
@@ -163,15 +190,15 @@ resource "aws_security_group" "load_balancer_security_group" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  tags = {
-    Name = "aws-goat-m2-sg"
-  }
+  tags = merge(local.common_tags, {
+    Name = "aws-goat-m2-sg${local.name_suffix}"
+  })
 }
 
 
 
 resource "aws_iam_role" "ecs-instance-role" {
-  name                 = "ecs-instance-role"
+  name                 = "ecs-instance-role${local.name_suffix}"
   path                 = "/"
   permissions_boundary = aws_iam_policy.instance_boundary_policy.arn
   assume_role_policy = jsonencode({
@@ -205,7 +232,7 @@ resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-3" {
 }
 
 resource "aws_iam_policy" "ecs_instance_policy" {
-  name = "aws-goat-instance-policy"
+  name   = "aws-goat-instance-policy${local.name_suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -225,7 +252,7 @@ resource "aws_iam_policy" "ecs_instance_policy" {
 }
 
 resource "aws_iam_policy" "instance_boundary_policy" {
-  name = "aws-goat-instance-boundary-policy"
+  name   = "aws-goat-instance-boundary-policy${local.name_suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -253,13 +280,13 @@ resource "aws_iam_policy" "instance_boundary_policy" {
 }
 
 resource "aws_iam_instance_profile" "ec2-deployer-profile" {
-  name = "ec2Deployer"
+  name = "ec2Deployer${local.name_suffix}"
   path = "/"
   role = aws_iam_role.ec2-deployer-role.id
 }
 resource "aws_iam_role" "ec2-deployer-role" {
-  name = "ec2Deployer-role"
-  path = "/"
+  name               = "ec2Deployer-role${local.name_suffix}"
+  path               = "/"
   assume_role_policy = jsonencode({
     "Version" : "2008-10-17",
     "Statement" : [
@@ -276,7 +303,7 @@ resource "aws_iam_role" "ec2-deployer-role" {
 }
 
 resource "aws_iam_policy" "ec2_deployer_admin_policy" {
-  name = "ec2DeployerAdmin-policy"
+  name   = "ec2DeployerAdmin-policy${local.name_suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -298,13 +325,13 @@ resource "aws_iam_role_policy_attachment" "ec2-deployer-role-attachment" {
 }
 
 resource "aws_iam_instance_profile" "ecs-instance-profile" {
-  name = "ecs-instance-profile"
+  name = "ecs-instance-profile${local.name_suffix}"
   path = "/"
   role = aws_iam_role.ecs-instance-role.id
 }
 resource "aws_iam_role" "ecs-task-role" {
-  name = "ecs-task-role"
-  path = "/"
+  name               = "ecs-task-role${local.name_suffix}"
+  path               = "/"
   assume_role_policy = jsonencode({
     "Version" : "2012-10-17",
     "Statement" : [
@@ -348,9 +375,10 @@ data "aws_ami" "ecs_optimized_ami" {
 
 
 resource "aws_launch_template" "ecs_launch_template" {
-  name_prefix   = "ecs-launch-template-"
+  name_prefix   = "ecs-launch-template-${local.name_suffix}-"
   image_id      = data.aws_ami.ecs_optimized_ami.id
-  instance_type = "t2.micro"
+  instance_type = "t3.micro"
+  tags          = merge(local.common_tags, { Name = "ecs-launch-template${local.name_suffix}" })
 
   iam_instance_profile {
     name = aws_iam_instance_profile.ecs-instance-profile.name
@@ -361,25 +389,32 @@ resource "aws_launch_template" "ecs_launch_template" {
 }
 
 resource "aws_autoscaling_group" "ecs_asg" {
-  name                = "ECS-lab-asg"
+  name                = "ECS-lab-asg${local.name_suffix}"
   vpc_zone_identifier = [aws_subnet.lab-subnet-public-1.id]
   desired_capacity    = 1
   min_size            = 0
   max_size            = 1
+  target_group_arns   = [aws_lb_target_group.target_group.arn]
 
   launch_template {
     id      = aws_launch_template.ecs_launch_template.id
     version = "$Latest"
   }
+
+  tag {
+    key                 = "Project"
+    value               = "AWSGoat"
+    propagate_at_launch = true
+  }
 }
 
 
 resource "aws_ecs_cluster" "cluster" {
-  name = "ecs-lab-cluster"
+  name = "ecs-lab-cluster${local.name_suffix}"
 
-  tags = {
-    name = "ecs-cluster-name"
-  }
+  tags = merge(local.common_tags, {
+    name = "ecs-cluster-name${local.name_suffix}"
+  })
 }
 
 data "template_file" "user_data" {
@@ -388,7 +423,7 @@ data "template_file" "user_data" {
 
 resource "aws_ecs_task_definition" "task_definition" {
   container_definitions    = data.template_file.task_definition_json.rendered
-  family                   = "ECS-Lab-Task-definition"
+  family                   = "ECS-Lab-Task-definition${local.name_suffix}"
   network_mode             = "bridge"
   memory                   = "512"
   cpu                      = "512"
@@ -408,6 +443,9 @@ resource "aws_ecs_task_definition" "task_definition" {
 
 data "template_file" "task_definition_json" {
   template = file("${path.module}/resources/ecs/task_definition.json")
+  vars = {
+    name_suffix = local.name_suffix
+  }
   depends_on = [
     null_resource.rds_endpoint
   ]
@@ -416,7 +454,7 @@ data "template_file" "task_definition_json" {
 
 
 resource "aws_ecs_service" "worker" {
-  name                              = "ecs_service_worker"
+  name                              = "ecs_service_worker${local.name_suffix}"
   cluster                           = aws_ecs_cluster.cluster.id
   task_definition                   = aws_ecs_task_definition.task_definition.arn
   desired_count                     = 1
@@ -424,34 +462,47 @@ resource "aws_ecs_service" "worker" {
 
   load_balancer {
     target_group_arn = aws_lb_target_group.target_group.arn
-    container_name   = "aws-goat-m2"
+    container_name   = "aws-goat-m2${local.name_suffix}"
     container_port   = 80
   }
   depends_on = [aws_lb_listener.listener]
 }
 
 resource "aws_alb" "application_load_balancer" {
-  name               = "aws-goat-m2-alb"
+  name               = "aws-goat-m2-alb${local.name_suffix}"
   internal           = false
   load_balancer_type = "application"
   subnets            = [aws_subnet.lab-subnet-public-1.id, aws_subnet.lab-subnet-public-1b.id]
   security_groups    = [aws_security_group.load_balancer_security_group.id]
 
-  tags = {
-    Name = "aws-goat-m2-alb"
-  }
+  tags = merge(local.common_tags, {
+    Name = "aws-goat-m2-alb${local.name_suffix}"
+    Project = "AWSGoat"
+  })
 }
 
 resource "aws_lb_target_group" "target_group" {
-  name        = "aws-goat-m2-tg"
+  name        = "aws-goat-m2-tg${local.name_suffix}"
   port        = 80
   protocol    = "HTTP"
   target_type = "instance"
   vpc_id      = aws_vpc.lab-vpc.id
 
-  tags = {
-    Name = "aws-goat-m2-tg"
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/login.php"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+    unhealthy_threshold = 3
   }
+
+  tags = merge(local.common_tags, {
+    Name = "aws-goat-m2-tg${local.name_suffix}"
+  })
 }
 
 resource "aws_lb_listener" "listener" {
@@ -467,8 +518,9 @@ resource "aws_lb_listener" "listener" {
 
 
 resource "aws_secretsmanager_secret" "rds_creds" {
-  name                    = "RDS_CREDS"
+  name                    = "RDS_CREDS${local.name_suffix}"
   recovery_window_in_days = 0
+  tags                    = merge(local.common_tags, { Name = "RDS_CREDS${local.name_suffix}" })
 }
 
 resource "aws_secretsmanager_secret_version" "secret_version" {
@@ -512,16 +564,23 @@ EOF
 }
 
 
-/* Creating a S3 Bucket for Terraform state file upload. */
-resource "aws_s3_bucket" "bucket_tf_files" {
-  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
-  tags = {
-    Name        = "Do not delete Bucket"
-    Environment = "Dev"
-  }
-}
+# State bucket is created by backend-bootstrap; see -backend-config in CI workflows.
 
 output "ad_Target_URL" {
   value = "${aws_alb.application_load_balancer.dns_name}:80/login.php"
+}
+
+output "student_id" {
+  description = "Student/lab instance ID (for multi-student; use in attack manuals for role names)"
+  value       = var.student_id
+}
+
+output "privesc_role_names" {
+  description = "IAM role/instance profile names used in IAM Privilege Escalation scenario (attack-manuals/module-2/04-IAM Privilege Escalation.md)"
+  value = {
+    ecs_instance_role   = aws_iam_role.ecs-instance-role.name
+    ec2_deployer_profile = aws_iam_instance_profile.ec2-deployer-profile.name
+    ec2_deployer_role    = aws_iam_role.ec2-deployer-role.name
+    boundary_policy     = aws_iam_policy.instance_boundary_policy.name
+  }
 }

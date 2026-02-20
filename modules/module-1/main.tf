@@ -1,4 +1,8 @@
 terraform {
+  backend "s3" {
+    # Partial config: pass bucket, key, region, workspace_key_prefix via -backend-config in CI (e.g. tf-apply-bulk.yml).
+    # See: https://developer.hashicorp.com/terraform/language/settings/backends/s3
+  }
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -7,10 +11,20 @@ terraform {
   }
 }
 provider "aws" {
-  region = "us-east-1"
+  region = var.region
+
+  default_tags {
+    tags = {
+      Project = "AWSGoat"
+    }
+  }
 }
 
 data "aws_caller_identity" "current" {}
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
 
 
 data "archive_file" "lambda_zip" {
@@ -22,10 +36,11 @@ data "archive_file" "lambda_zip" {
 
 resource "aws_lambda_function" "react_lambda_app" {
   filename      = "resources/lambda/out/reactapp.zip"
-  function_name = "blog-application"
+  function_name = "blog-application${local.name_suffix}"
   handler       = "index.handler"
   runtime       = "nodejs18.x"
   role          = aws_iam_role.blog_app_lambda.arn
+  tags          = merge(local.common_tags, { Name = "blog-application${local.name_suffix}" })
   depends_on    = [data.archive_file.lambda_zip, null_resource.file_replacement_lambda_react]
 }
 
@@ -33,7 +48,7 @@ resource "aws_lambda_function" "react_lambda_app" {
 /* Lambda iam Role */
 
 resource "aws_iam_role" "blog_app_lambda" {
-  name = "blog_app_lambda"
+  name = "blog_app_lambda${local.name_suffix}"
 
   assume_role_policy = <<EOF
 {
@@ -64,7 +79,12 @@ resource "aws_iam_role_policy_attachment" "ba_lambda_attach_3" {
 
 
 resource "aws_api_gateway_rest_api" "api" {
-  name = "blog-application"
+  name = "blog-application${local.name_suffix}"
+
+  tags = merge(local.common_tags, {
+    Name = "blog-application${local.name_suffix}"
+  })
+
   endpoint_configuration {
     types = [
       "REGIONAL"
@@ -170,8 +190,13 @@ resource "aws_api_gateway_stage" "api" {
 
 
 resource "aws_api_gateway_rest_api" "apiLambda_ba" {
-  name           = "blog-application-api"
+  name           = "blog-application-api${local.name_suffix}"
   api_key_source = "HEADER"
+
+  tags = merge(local.common_tags, {
+    Name = "blog-application-api${local.name_suffix}"
+  })
+
   endpoint_configuration {
     types = [
       "REGIONAL"
@@ -668,7 +693,7 @@ resource "aws_api_gateway_integration_response" "lambda_dump_root_post_integrati
   rest_api_id = aws_api_gateway_rest_api.apiLambda_ba.id
   resource_id = aws_api_gateway_resource.dump_root.id
   http_method = aws_api_gateway_method.proxy_dump_root_get.http_method
-  status_code = aws_api_gateway_method_response.dump_root_options_response_200.status_code
+  status_code = aws_api_gateway_method_response.proxy_dump_root_get_response_200.status_code
 
 
   response_parameters = {
@@ -3075,23 +3100,26 @@ data "archive_file" "lambda_zip_bap" {
 }
 resource "aws_lambda_layer_version" "lambda_layer" {
   filename                 = "resources/lambda/layer/bcrypt-pyjwt.zip"
-  layer_name               = "bcrypt-pyjwt"
+  layer_name               = "bcrypt-pyjwt${local.name_suffix}"
   compatible_architectures = ["x86_64"]
   compatible_runtimes      = ["python3.9"]
 }
 
 resource "aws_lambda_function" "lambda_ba_data" {
   filename      = "resources/lambda/out/data_app.zip"
-  function_name = "blog-application-data"
+  function_name = "blog-application-data${local.name_suffix}"
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.9"
   role          = aws_iam_role.blog_app_lambda_python.arn
+  tags          = merge(local.common_tags, { Name = "blog-application-data${local.name_suffix}" })
   depends_on    = [data.archive_file.lambda_zip_bap]
   layers        = [aws_lambda_layer_version.lambda_layer.arn]
   memory_size   = "256"
   environment {
     variables = {
-      JWT_SECRET = "T2BYL6#]zc>Byuzu"
+      JWT_SECRET   = "T2BYL6#]zc>Byuzu"
+      USERS_TABLE  = aws_dynamodb_table.users_table.name
+      POSTS_TABLE  = aws_dynamodb_table.posts_table.name
     }
   }
 }
@@ -3100,7 +3128,7 @@ resource "aws_lambda_function" "lambda_ba_data" {
 /* Lambda iam Role */
 
 resource "aws_iam_role" "blog_app_lambda_python" {
-  name = "blog_app_lambda_data"
+  name = "blog_app_lambda_data${local.name_suffix}"
 
   assume_role_policy = <<EOF
 {
@@ -3126,7 +3154,7 @@ resource "aws_iam_role_policy_attachment" "blog_app_policy" {
 }
 
 resource "aws_iam_policy" "lambda_data_policies" {
-  name = "lambda-data-policies"
+  name   = "lambda-data-policies${local.name_suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -3175,6 +3203,9 @@ resource "aws_lambda_permission" "apigw_ba_python" {
 /* Local Variable for mime_types */
 
 locals {
+  # Suffix for multi-student deployment. S3 allows [a-z0-9.-]; IAM allows alphanumeric and +=,.@-
+  name_suffix = var.student_id == "default" ? "" : "-${lower(replace(var.student_id, "_", "-"))}"
+  common_tags = { Project = "AWSGoat" }
   content_type_map = {
     html = "text/html",
     js   = "application/javascript",
@@ -3192,12 +3223,12 @@ locals {
 
 /* Creating a S3 Bucket for webfiles files upload. */
 resource "aws_s3_bucket" "bucket_upload" {
-  bucket        = "production-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}"
+  bucket        = "production-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}${local.name_suffix}"
   force_destroy = true
-  tags = {
-    Name        = "Production bucket"
+  tags = merge(local.common_tags, {
+    Name        = "Production-bucket${local.name_suffix}"
     Environment = "Prod"
-  }
+  })
 }
 
 # ACL fixes required for AWS S3 APR 2023 updates.
@@ -3278,12 +3309,12 @@ resource "aws_s3_object" "upload_folder_prod" {
 
 #Development bucket
 resource "aws_s3_bucket" "dev" {
-  bucket = "dev-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}"
+  bucket = "dev-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}${local.name_suffix}"
 
-  tags = {
-    Name        = "Development bucket"
+  tags = merge(local.common_tags, {
+    Name        = "Development-bucket${local.name_suffix}"
     Environment = "Dev"
-  }
+  })
 }
 
 
@@ -3358,13 +3389,13 @@ resource "aws_s3_object" "upload_folder_dev_2" {
 
 /* Creating a S3 Bucket for ec2-files upload. */
 resource "aws_s3_bucket" "bucket_temp" {
-  bucket        = "ec2-temp-bucket-${data.aws_caller_identity.current.account_id}"
+  bucket        = "ec2-temp-bucket-${data.aws_caller_identity.current.account_id}${local.name_suffix}"
   force_destroy = true
 
-  tags = {
-    Name        = "Temporary bucket"
+  tags = merge(local.common_tags, {
+    Name        = "Temporary-bucket${local.name_suffix}"
     Environment = "Dev"
-  }
+  })
 }
 
 # ACL fixes required for AWS S3 APR 2023 updates.
@@ -3415,16 +3446,7 @@ resource "aws_s3_object" "upload_temp_object_2" {
   content_type = lookup(local.content_type_map, regex("\\.(?P<extension>[A-Za-z0-9]+)$", each.value).extension, "application/octet-stream")
   depends_on   = [aws_s3_bucket.bucket_upload, null_resource.file_replacement_lambda_react, aws_s3_bucket_acl.bucket_temp]
 }
-/* Creating a S3 Bucket for Terraform state file upload. */
-resource "aws_s3_bucket" "bucket_tf_files" {
-  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
-  tags = {
-    Name        = "Do not delete Bucket"
-    Environment = "Dev"
-  }
-}
-
+# State bucket is created by backend-bootstrap; see -backend-config in CI workflows.
 
 # VPC to deploy web app
 
@@ -3432,24 +3454,24 @@ resource "aws_vpc" "goat_vpc" {
   cidr_block           = "192.168.0.0/16"
   instance_tenancy     = "default"
   enable_dns_hostnames = true
-  tags = {
-    Name = "AWS_GOAT_VPC"
-  }
+  tags = merge(local.common_tags, {
+    Name = "AWS_GOAT_VPC${local.name_suffix}"
+  })
 }
 resource "aws_internet_gateway" "goat_gw" {
   vpc_id = aws_vpc.goat_vpc.id
-  tags = {
-    Name = "app gateway"
-  }
+  tags = merge(local.common_tags, {
+    Name = "app-gateway${local.name_suffix}"
+  })
 }
 resource "aws_subnet" "goat_subnet" {
   vpc_id                  = aws_vpc.goat_vpc.id
   cidr_block              = "192.168.0.0/24"
-  availability_zone       = "us-east-1a"
+  availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
-  tags = {
-    Name = "AWS_GOAT App subnet"
-  }
+  tags = merge(local.common_tags, {
+    Name = "AWS_GOAT-App-subnet${local.name_suffix}"
+  })
 }
 
 resource "aws_route_table" "goat_rt" {
@@ -3465,8 +3487,8 @@ resource "aws_route_table_association" "goat_public_rta" {
 }
 
 resource "aws_security_group" "goat_sg" {
-  name        = "AWS_GOAT_sg"
-  description = "AWS_GOAT_sg"
+  name        = "AWS_GOAT_sg${local.name_suffix}"
+  description = "AWS_GOAT_sg${local.name_suffix}"
   vpc_id      = aws_vpc.goat_vpc.id
   ingress {
     from_port   = 22
@@ -3481,19 +3503,19 @@ resource "aws_security_group" "goat_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "AWS_GOAT_sg"
-  }
+  tags = merge(local.common_tags, {
+    Name = "AWS_GOAT_sg${local.name_suffix}"
+  })
 }
 
 
 # Instance Requirements
 resource "aws_iam_instance_profile" "goat_iam_profile" {
-  name = "AWS_GOAT_ec2_profile"
+  name = "AWS_GOAT_ec2_profile${local.name_suffix}"
   role = aws_iam_role.goat_role.name
 }
 resource "aws_iam_role" "goat_role" {
-  name               = "AWS_GOAT_ROLE"
+  name               = "AWS_GOAT_ROLE${local.name_suffix}"
   path               = "/"
   assume_role_policy = <<EOF
 {
@@ -3523,7 +3545,7 @@ resource "aws_iam_role_policy_attachment" "goat_policy" {
 }
 
 resource "aws_iam_policy" "goat_inline_policy_2" {
-  name = "dev-ec2-lambda-policies"
+  name   = "dev-ec2-lambda-policies${local.name_suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -3598,13 +3620,13 @@ data "aws_ami" "goat_ami" {
 
 resource "aws_instance" "goat_instance" {
   ami                  = data.aws_ami.goat_ami.id
-  instance_type        = "t2.micro"
+  instance_type        = "t3.micro"
   iam_instance_profile = aws_iam_instance_profile.goat_iam_profile.name
   subnet_id            = aws_subnet.goat_subnet.id
   security_groups      = [aws_security_group.goat_sg.id]
-  tags = {
-    Name = "AWS_GOAT_DEV_INSTANCE"
-  }
+  tags = merge(local.common_tags, {
+    Name = "AWS_GOAT_DEV_INSTANCE${local.name_suffix}"
+  })
   user_data = data.template_file.goat_script.rendered
   depends_on = [
     aws_s3_object.upload_temp_object_2
@@ -3613,10 +3635,11 @@ resource "aws_instance" "goat_instance" {
 
 
 resource "aws_dynamodb_table" "users_table" {
-  name           = "blog-users"
+  name           = "blog-users${local.name_suffix}"
   billing_mode   = "PROVISIONED"
   read_capacity  = 2
   write_capacity = 2
+  tags           = merge(local.common_tags, { Name = "blog-users${local.name_suffix}" })
 
   hash_key = "email"
   attribute {
@@ -3625,10 +3648,11 @@ resource "aws_dynamodb_table" "users_table" {
   }
 }
 resource "aws_dynamodb_table" "posts_table" {
-  name           = "blog-posts"
+  name           = "blog-posts${local.name_suffix}"
   billing_mode   = "PROVISIONED"
   read_capacity  = 2
   write_capacity = 2
+  tags           = merge(local.common_tags, { Name = "blog-posts${local.name_suffix}" })
 
   hash_key = "id"
   attribute {
@@ -3642,7 +3666,7 @@ resource "null_resource" "populate_table" {
   provisioner "local-exec" {
     command     = <<EOF
 sed -i 's/replace-bucket-name/${aws_s3_bucket.bucket_upload.bucket}/g' resources/dynamodb/blog-posts.json
-python3 resources/dynamodb/populate-table.py
+USERS_TABLE='${aws_dynamodb_table.users_table.name}' POSTS_TABLE='${aws_dynamodb_table.posts_table.name}' python3 resources/dynamodb/populate-table.py
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
@@ -3662,7 +3686,7 @@ resource "null_resource" "file_replacement_ec2_ip" {
 
 resource "null_resource" "file_replacement_lambda_react" {
   provisioner "local-exec" {
-    command     = "sed -i 's/replace-bucket-name/${aws_s3_bucket.bucket_upload.bucket}/g' resources/lambda/react/index.js"
+    command     = "sed -i 's/replace-bucket-name/${aws_s3_bucket.bucket_upload.bucket}/g; s/REPLACE_REGION/${var.region}/g' resources/lambda/react/index.js"
     interpreter = ["/bin/bash", "-c"]
   }
   depends_on = [
@@ -3714,5 +3738,21 @@ EOF
 
 output "app_url" {
   value = "${aws_api_gateway_stage.api.invoke_url}/react"
+}
+
+output "student_id" {
+  description = "Student/lab instance ID (for multi-student; use in attack manuals for role/bucket names)"
+  value       = var.student_id
+}
+
+output "privesc_role_names" {
+  description = "IAM role names used in IAM Privilege Escalation scenario (attack-manuals/module-1/07-IAM Privilege Escalation.md)"
+  value = {
+    ec2_instance_profile = aws_iam_instance_profile.goat_iam_profile.name
+    ec2_role              = aws_iam_role.goat_role.name
+    lambda_role           = aws_iam_role.blog_app_lambda_python.name
+    dev_ec2_policy        = aws_iam_policy.goat_inline_policy_2.name
+    lambda_data_policy    = aws_iam_policy.lambda_data_policies.name
+  }
 }
 
